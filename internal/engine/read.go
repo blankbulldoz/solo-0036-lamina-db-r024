@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"lamina/internal/catalog"
 	"lamina/internal/datum"
 	"lamina/internal/query"
 )
@@ -60,7 +61,35 @@ func (d *DB) Query(q query.Request) (query.Result, error) {
 	if err != nil {
 		return result, invalid(err)
 	}
+	if err = d.materialize(r, result.Rows); err != nil {
+		return query.Result{}, err
+	}
 	return result, nil
+}
+
+// materialize resolves every externalized reference in projected rows back to
+// its full text before returning. Stored rows and the journal retain only the
+// compact ref; a blob that cannot be read or fails its digest check fails the
+// query instead of returning a dangling value. Staged (still inline) text and
+// small inline values pass through unchanged.
+func (d *DB) materialize(relation catalog.Relation, rows []datum.Row) error {
+	for _, row := range rows {
+		for _, col := range relation.Columns {
+			if col.Type != "large_text" {
+				continue
+			}
+			v, present := row[col.Name]
+			if !present || v.Null() || v.Kind != "large_ref" {
+				continue
+			}
+			payload, err := d.blobStore.Read(v.Ref)
+			if err != nil {
+				return fault("unavailable", "large value unreadable: %s", err)
+			}
+			row[col.Name] = datum.Value{Kind: "text", Text: string(payload)}
+		}
+	}
+	return nil
 }
 func (d *DB) Get(id, table string, key datum.Value) (datum.Row, error) {
 	q := query.Request{Relation: table, Transaction: id, Limit: 1}

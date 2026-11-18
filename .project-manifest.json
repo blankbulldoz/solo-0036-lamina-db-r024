@@ -22,6 +22,12 @@
       "responsibility": "per-key version chains and visibility, retention pruning"
     },
     {
+      "id": "blobs",
+      "name": "blobs",
+      "path": "internal/blobs",
+      "responsibility": "content-addressed external large values, reference reachability and bounded reclamation"
+    },
+    {
       "id": "journal",
       "name": "journal",
       "path": "internal/journal",
@@ -368,6 +374,32 @@
       "success": "query execution facts and database resource state produces a verified domain result",
       "failure": "candidates vs scanned vs returned have distinct meanings",
       "verification": "python3 examples/walkthrough.py --workflow statistics"
+    },
+    {
+      "id": "large-values",
+      "name": "externalized large-value references and version-aware reclamation",
+      "entry": "large_text columns via POST /transactions/{tx}/put, /query, /vacuum and /backup",
+      "steps": [
+        "transport",
+        "engine",
+        "blobs",
+        "catalog",
+        "versions",
+        "journal",
+        "snapshot"
+      ],
+      "module_ids": [
+        "transport",
+        "engine",
+        "blobs",
+        "catalog",
+        "versions",
+        "journal",
+        "snapshot"
+      ],
+      "success": "externalized large-value references and version-aware reclamation produces a verified domain result",
+      "failure": "active snapshot pinned blob retained; budget rejection consumes no sequence",
+      "verification": "python3 examples/walkthrough.py --workflow large-values"
     }
   ],
   "complexity": {

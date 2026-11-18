@@ -10,6 +10,12 @@ import (
 
 func Execute(r catalog.Relation, q Request, rows map[string]datum.Row, plan Plan, keys []string) (Result, error) {
 	result := Result{Rows: []datum.Row{}, Plan: plan}
+	largeColumns := map[string]bool{}
+	for _, c := range r.Columns {
+		if c.Type == "large_text" {
+			largeColumns[c.Name] = true
+		}
+	}
 	if plan.Access == "scan" {
 		keys = datum.Keys(rows)
 	}
@@ -20,7 +26,7 @@ func Execute(r catalog.Relation, q Request, rows map[string]datum.Row, plan Plan
 			continue
 		}
 		result.Scanned++
-		if Matches(row, q.Where) {
+		if MatchesTyped(row, q.Where, largeColumns) {
 			selected = append(selected, row)
 		}
 	}

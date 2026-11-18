@@ -14,11 +14,12 @@ import (
 const MaxImage = 128 << 20
 
 type Image struct {
-	Format   int              `json:"format"`
-	Sequence uint64           `json:"sequence"`
-	Horizon  uint64           `json:"horizon"`
-	Catalog  *catalog.Catalog `json:"catalog"`
-	Store    *versions.Store  `json:"store"`
+	Format   int               `json:"format"`
+	Sequence uint64            `json:"sequence"`
+	Horizon  uint64            `json:"horizon"`
+	Catalog  *catalog.Catalog  `json:"catalog"`
+	Store    *versions.Store   `json:"store"`
+	Blobs    map[string][]byte `json:"blobs"`
 }
 type Envelope struct {
 	Format  int             `json:"format"`
@@ -51,6 +52,12 @@ func Decode(b []byte) (Image, error) {
 	if err := json.Unmarshal(env.Payload, &image); err != nil {
 		return image, err
 	}
+	// Images written before large values omitted the blobs field; treat them
+	// as an empty closure. Such images cannot contain large_ref rows, which
+	// the reachability check below enforces.
+	if image.Blobs == nil {
+		image.Blobs = map[string][]byte{}
+	}
 	if err := Validate(image); err != nil {
 		return image, err
 	}
@@ -69,7 +76,7 @@ func Read(path string) (Image, error) {
 	return Decode(b)
 }
 func Validate(image Image) error {
-	if image.Format != 1 || image.Horizon > image.Sequence || image.Catalog == nil || image.Store == nil || image.Catalog.Relations == nil || image.Catalog.Indexes == nil || image.Store.Tables == nil {
+	if image.Format != 1 || image.Horizon > image.Sequence || image.Catalog == nil || image.Store == nil || image.Catalog.Relations == nil || image.Catalog.Indexes == nil || image.Store.Tables == nil || image.Blobs == nil {
 		return fmt.Errorf("invalid image header")
 	}
 	for name, r := range image.Catalog.Relations {
@@ -85,8 +92,12 @@ func Validate(image Image) error {
 		if !ok || name != definition.Name || !catalog.ValidName(name) || definition.Created < relation.Created || definition.Created > image.Sequence {
 			return fmt.Errorf("invalid index metadata")
 		}
-		if _, ok := relation.Column(definition.Column); !ok {
+		col, ok := relation.Column(definition.Column)
+		if !ok {
 			return fmt.Errorf("invalid index column")
+		}
+		if col.Type == "large_text" {
+			return fmt.Errorf("large_text columns cannot be indexed")
 		}
 	}
 	for name, rows := range image.Store.Tables {
@@ -111,6 +122,47 @@ func Validate(image Image) error {
 					}
 				}
 			}
+		}
+	}
+	// Every externalized reference in a retained version must resolve to a
+	// payload carried by the image, with matching length and digest. The image
+	// is self-contained: a dangling or corrupted blob rejects the image before
+	// any state is published by restore or checkpoint recovery.
+	referenced := map[string]int{}
+	for _, rows := range image.Store.Tables {
+		for _, chain := range rows {
+			for _, v := range chain {
+				if v.Deleted {
+					continue
+				}
+				for _, value := range v.Row {
+					if ref, ok := value.LargeRef(); ok {
+						referenced[ref.Hash] = ref.Length
+					}
+				}
+			}
+		}
+	}
+	for hash, length := range referenced {
+		payload, ok := image.Blobs[hash]
+		if !ok {
+			return fmt.Errorf("image missing blob %s referenced by a retained version", hash)
+		}
+		if len(payload) != length {
+			return fmt.Errorf("image blob %s length mismatch", hash)
+		}
+		h := sha256.Sum256(payload)
+		if hex.EncodeToString(h[:]) != hash {
+			return fmt.Errorf("image blob %s digest mismatch", hash)
+		}
+	}
+	for hash, payload := range image.Blobs {
+		h := sha256.Sum256(payload)
+		if hex.EncodeToString(h[:]) != hash {
+			return fmt.Errorf("image blob %s digest mismatch", hash)
+		}
+		if _, reachable := referenced[hash]; !reachable {
+			return fmt.Errorf("image carries unreachable blob %s", hash)
 		}
 	}
 	for _, definition := range image.Catalog.Indexes {

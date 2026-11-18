@@ -87,3 +87,28 @@ func (s *Store) Count() (keys, versions int) {
 	}
 	return
 }
+
+// LargeRefs enumerates the content references of every retained non-tombstone
+// version. It is the single source of blob reachability: a blob is retained
+// exactly when it appears here, which includes versions kept for active
+// snapshots and historical reads, not merely current rows.
+func (s *Store) LargeRefs() []datum.Ref {
+	seen := map[string]bool{}
+	var out []datum.Ref
+	for _, rows := range s.Tables {
+		for _, chain := range rows {
+			for _, v := range chain {
+				if v.Deleted {
+					continue
+				}
+				for _, value := range v.Row {
+					if ref, ok := value.LargeRef(); ok && !seen[ref.Hash] {
+						seen[ref.Hash] = true
+						out = append(out, ref)
+					}
+				}
+			}
+		}
+	}
+	return out
+}

@@ -10,6 +10,10 @@ var identifier = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 
 func ValidName(s string) bool { return identifier.MatchString(s) }
 
+// MaxLargeText caps a single externalized value; it is intentionally smaller
+// than the 1MiB request body so large values can enter through a single put.
+const MaxLargeText = 512 << 10
+
 type Column struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
@@ -36,12 +40,12 @@ func (r Relation) Validate() error {
 			return fmt.Errorf("invalid or duplicate column %q", c.Name)
 		}
 		seen[c.Name] = true
-		if c.Type != "int" && c.Type != "text" && c.Type != "bool" {
+		if c.Type != "int" && c.Type != "text" && c.Type != "bool" && c.Type != "large_text" {
 			return fmt.Errorf("unsupported type %q", c.Type)
 		}
 		if c.Name == r.Primary {
 			found = true
-			if c.Nullable || c.Type == "bool" {
+			if c.Nullable || c.Type == "bool" || c.Type == "large_text" {
 				return fmt.Errorf("primary must be non-null int or text")
 			}
 		}
@@ -74,11 +78,14 @@ func (r Relation) Normalize(row datum.Row) (datum.Row, error) {
 			}
 			v = datum.Value{Kind: "null"}
 		}
-		if !v.Null() && v.Kind != c.Type {
+		if !v.Null() && v.Kind != c.Type && !(c.Type == "large_text" && v.Kind == "text") && !(c.Type == "large_text" && v.Kind == "large_ref") {
 			return nil, fmt.Errorf("column %s requires %s", c.Name, c.Type)
 		}
-		if v.Kind == "text" && len(v.Text) > 65536 {
+		if v.Kind == "text" && c.Type == "text" && len(v.Text) > 65536 {
 			return nil, fmt.Errorf("text exceeds 64KiB")
+		}
+		if c.Type == "large_text" && v.Kind == "text" && len(v.Text) > MaxLargeText {
+			return nil, fmt.Errorf("large_text exceeds %d bytes", MaxLargeText)
 		}
 		out[c.Name] = v
 	}

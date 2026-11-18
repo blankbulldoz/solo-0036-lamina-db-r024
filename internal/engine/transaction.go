@@ -76,6 +76,9 @@ func (d *DB) Put(id, table string, row datum.Row, insertOnly bool) error {
 	if err != nil {
 		return invalid(err)
 	}
+	if err = rejectClientRefs(r, normalized); err != nil {
+		return err
+	}
 	key := r.Key(normalized)
 	rows := d.store.Scan(table, tx.Snapshot)
 	overlay(rows, tx.writes, table)

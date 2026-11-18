@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded production walkthroughs using only the public HTTP service."""
 import argparse, concurrent.futures, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
-WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics']
+WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics','large-values']
 class Session:
  def __init__(self,binary,root,restore=None):
   self.binary=str(binary);self.root=pathlib.Path(root);self.restore=restore;self.process=None;self.log=None
@@ -34,9 +34,9 @@ class Session:
   if code!=status:raise RuntimeError(f'{method} {path}: expected {status}, got {code}: {body.decode()}')
   return body if raw else json.loads(body)
  def begin(self,readonly=False):return self.call('POST','/transactions',{'read_only':readonly},201)['id']
- def put(self,tx,row,status=200,insert=False):return self.call('POST',f'/transactions/{tx}/put',{'relation':'spectra','row':row,'insert_only':insert},status)
+ def put(self,tx,row,status=200,insert=False,relation='spectra'):return self.call('POST',f'/transactions/{tx}/put',{'relation':relation,'row':row,'insert_only':insert},status)
  def commit(self,tx,status=200):return self.call('POST',f'/transactions/{tx}/commit',status=status)
- def query(self,**kwargs):return self.call('POST','/query',{'relation':'spectra',**kwargs})
+ def query(self,relation='spectra',**kwargs):return self.call('POST','/query',{'relation':relation,**kwargs})
  def stats(self):return self.call('GET','/stats')
 def require(condition,message):
  if not condition:raise RuntimeError(message)
@@ -50,7 +50,7 @@ def seed(s):
  return s.commit(tx)['sequence']
 def walkthrough(name,binary):
  with tempfile.TemporaryDirectory(prefix='lamina-flow-') as temp:
-  temp=pathlib.Path(temp);s=Session(binary,temp/'source').start();other=None
+  temp=pathlib.Path(temp);s=Session(binary,temp/'source').start();other=None;restored=None
   try:
    seed_seq=seed(s);observations={}
    if name=='catalog-create':
@@ -152,11 +152,50 @@ def walkthrough(name,binary):
     q=s.query(where=[{'column':'amplitude','op':'>=','value':40}],limit=2)
     require(q['matched']==3 and q['scanned']==3 and len(q['rows'])==2 and q['truncated'],'query fact meanings conflated')
     observations={'query':q,'stats':s.stats()}
+   elif name=='large-values':
+    big='X'*5000;second='Y'*5000;small='inline'
+    schema={'name':'docs','primary':'id','columns':[{'name':'id','type':'int'},{'name':'title','type':'text'},{'name':'body','type':'large_text','nullable':True}]}
+    s.call('POST','/relations',schema,201)
+    s.call('POST','/indexes',{'name':'by_body','relation':'docs','column':'body'},400)
+    tx=s.begin();s.put(tx,{'id':1,'title':'a','body':big},relation='docs',insert=True)
+    s.put(tx,{'id':2,'title':'b','body':small},relation='docs',insert=True);s.commit(tx)
+    lv=s.stats()['large_values'];require(lv['blobs']==1 and lv['total_bytes']==len(big),'externalization footprint wrong')
+    require(s.query('docs',where=[{'column':'id','op':'=','value':1}])['rows'][0]['body']==big,'full large row not materialized')
+    tx=s.begin();s.put(tx,{'id':1,'title':'a2','body':big},relation='docs');s.commit(tx)
+    tx=s.begin();s.put(tx,{'id':3,'title':'c','body':big},relation='docs',insert=True);s.commit(tx)
+    require(s.stats()['large_values']['blobs']==1,'content was duplicated')
+    tx=s.begin();s.put(tx,{'id':4,'title':'d','body':second},relation='docs',insert=True);s.commit(tx)
+    require(s.stats()['large_values']['blobs']==2,'distinct content not stored')
+    hit=s.query('docs',where=[{'column':'body','op':'=','value':big}])
+    require({r['id'] for r in hit['rows']}=={1,3},'content equality failed')
+    staged=s.begin();s.put(staged,{'id':5,'title':'e','body':big},relation='docs')
+    own=s.query('docs',transaction=staged,where=[{'column':'body','op':'=','value':big}])
+    require(any(r['id']==5 for r in own['rows']),'staged large value not matched')
+    before=s.stats()['large_values'];s.call('POST',f'/transactions/{staged}/rollback')
+    require(s.stats()['large_values']==before,'rolled-back write leaked occupancy')
+    reader=s.begin();tx=s.begin();s.put(tx,{'id':4,'title':'d2','body':None},relation='docs');s.commit(tx)
+    head=s.stats()['sequence'];pinned=s.call('POST','/vacuum',{'horizon':head})
+    require(pinned['pinned'] and pinned['blobs_reaped']==0,'active snapshot did not pin blob')
+    require(s.query('docs',transaction=reader,where=[{'column':'id','op':'=','value':4}])['rows'][0]['body']==second,'pinned blob lost')
+    s.call('POST',f'/transactions/{reader}/rollback')
+    reclaimed=s.call('POST','/vacuum',{'horizon':head});require(reclaimed['blobs_reaped']>=1,'unreferenced blob not reaped')
+    require(s.stats()['large_values']['orphan_blobs']==0,'orphan accounting wrong')
+    require(s.query('docs',where=[{'column':'id','op':'=','value':1}])['rows'][0]['body']==big,'retained row dangling after vacuum')
+    backup=s.call('GET','/backup',raw=True);image=json.loads(backup)['payload']
+    on_disk={p.name for p in pathlib.Path(s.root,'blobs').rglob('*') if p.is_file()}
+    require(set(image['blobs'].keys())==on_disk,'backup closure differs from reachable blobs')
+    path=temp/'docs.lmi';path.write_bytes(backup)
+    restored=Session(binary,temp/'docs-restored',path).start()
+    require(restored.query('docs',where=[{'column':'id','op':'=','value':1}])['rows'][0]['body']==big,'restored large row broken')
+    restored.call('POST','/checkpoint');restored.stop();restored.start()
+    require(restored.query('docs',where=[{'column':'id','op':'=','value':1}])['rows'][0]['body']==big,'blob did not survive restart')
+    observations={'pinned':pinned,'reclaimed':reclaimed,'large_values':s.stats()['large_values']}
    else:raise ValueError(name)
    return {'workflow':name,'status':'observed','observations':observations}
   finally:
    s.stop()
    if other:other.stop()
+   if restored:restored.stop()
 def main():
  parser=argparse.ArgumentParser();parser.add_argument('--workflow',choices=['all',*WORKFLOWS],default='all');args=parser.parse_args()
  project=pathlib.Path(__file__).resolve().parents[1];binary=project/'bin/laminad'

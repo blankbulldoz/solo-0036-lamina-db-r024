@@ -36,8 +36,12 @@ func (c *Catalog) CheckIndex(i Index) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := r.Column(i.Column); !ok {
+	col, ok := r.Column(i.Column)
+	if !ok {
 		return fmt.Errorf("unknown index column")
+	}
+	if col.Type == "large_text" {
+		return fmt.Errorf("large_text columns cannot be indexed")
 	}
 	return nil
 }

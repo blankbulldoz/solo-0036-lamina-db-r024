@@ -1,6 +1,9 @@
 package engine
 
-import "sort"
+import (
+	"lamina/internal/blobs"
+	"sort"
+)
 
 type Stats struct {
 	Sequence       uint64         `json:"sequence"`
@@ -15,6 +18,7 @@ type Stats struct {
 	Commits        uint64         `json:"commits_since_open"`
 	Conflicts      uint64         `json:"conflicts_since_open"`
 	Queries        uint64         `json:"queries_since_open"`
+	LargeValues    blobs.Stats    `json:"large_values"`
 }
 
 func (d *DB) Stats() (Stats, error) {
@@ -24,7 +28,7 @@ func (d *DB) Stats() (Stats, error) {
 		return Stats{}, err
 	}
 	keys, versions := d.store.Count()
-	s := Stats{Sequence: d.sequence, Horizon: d.horizon, Keys: keys, Versions: versions, Active: []Transaction{}, IndexEntries: map[string]int{}, JournalRecords: len(d.wal.Records), HistoryBase: d.wal.Base, RecoveredTail: d.wal.RecoveredTail, Commits: d.commits, Conflicts: d.conflicts, Queries: d.queries}
+	s := Stats{Sequence: d.sequence, Horizon: d.horizon, Keys: keys, Versions: versions, Active: []Transaction{}, IndexEntries: map[string]int{}, JournalRecords: len(d.wal.Records), HistoryBase: d.wal.Base, RecoveredTail: d.wal.RecoveredTail, Commits: d.commits, Conflicts: d.conflicts, Queries: d.queries, LargeValues: d.blobStore.Stats()}
 	for _, tx := range d.transactions {
 		copy := *tx
 		copy.writes = nil

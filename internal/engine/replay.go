@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"lamina/internal/catalog"
 	"lamina/internal/datum"
 	"lamina/internal/journal"
 )
@@ -54,11 +55,27 @@ func (d *DB) apply(r journal.Record) error {
 			}
 		}
 		d.store.Apply(r.Sequence, r.Writes)
+		for _, m := range r.Writes {
+			if m.Deleted {
+				continue
+			}
+			for _, value := range m.Row {
+				if ref, ok := value.LargeRef(); ok {
+					d.blobStore.Hold(ref)
+				}
+			}
+		}
 	case "vacuum":
 		if r.Horizon < d.horizon || r.Horizon > d.sequence {
 			return fmt.Errorf("invalid vacuum horizon")
 		}
 		d.store.Vacuum(r.Horizon)
+		// Reclaim only blobs unreachable from the versions that survived
+		// pruning. Active readers pin versions, which transitively pin their
+		// blobs, so no visible row can be left dangling.
+		if _, _, err := d.blobStore.Sweep(d.store.LargeRefs()); err != nil {
+			return fmt.Errorf("large-value reclamation: %w", err)
+		}
 		d.horizon = r.Horizon
 	default:
 		return fmt.Errorf("unknown record kind %s", r.Kind)
@@ -74,4 +91,16 @@ func overlay(rows map[string]datum.Row, writes map[string]map[string]staged, tab
 			rows[key] = datum.Clone(m.Mutation.Row)
 		}
 	}
+}
+
+// rejectClientRefs enforces that large_text values enter as text (or null).
+// Content references are internal: only externalize may mint one, so a client
+// cannot point a row at an arbitrary or nonexistent blob.
+func rejectClientRefs(relation catalog.Relation, row datum.Row) error {
+	for _, col := range relation.Columns {
+		if col.Type == "large_text" && row[col.Name].Kind == "large_ref" {
+			return fault("invalid", "column %s takes text; references are assigned internally", col.Name)
+		}
+	}
+	return nil
 }

@@ -1,10 +1,13 @@
 package versions
 
 type VacuumResult struct {
-	Horizon  uint64 `json:"horizon"`
-	Removed  int    `json:"removed"`
-	Retained int    `json:"retained"`
-	Pinned   bool   `json:"pinned"`
+	Horizon     uint64 `json:"horizon"`
+	Removed     int    `json:"removed"`
+	Retained    int    `json:"retained"`
+	Pinned      bool   `json:"pinned"`
+	BlobsReaped int    `json:"blobs_reaped"`
+	BlobBytes   int    `json:"blob_bytes_retained"`
+	BlobBudget  int    `json:"blob_budget_bytes"`
 }
 
 func (s *Store) Vacuum(horizon uint64) VacuumResult {
